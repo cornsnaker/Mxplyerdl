@@ -16,6 +16,7 @@ import sys
 import re
 import os
 import json
+import argparse
 import subprocess
 from urllib.parse import urljoin, urlparse
 from datetime import datetime
@@ -61,7 +62,44 @@ def fetch(url, cookies_header, referer=None):
         print(f"[!] HTTP error fetching {url}: {e}")
         return ""
 
+def extract_metadata_from_jsonld(html):
+    """Parses application/ld+json block to extract series/movie info."""
+    pattern = r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>'
+    # Use finditer to check all blocks
+    for m in re.finditer(pattern, html, re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+            # Normalize to list
+            if isinstance(data, dict):
+                data = [data]
+
+            if isinstance(data, list):
+                for item in data:
+                    if item.get('@type') in ['Episode', 'Movie']:
+                        return item
+        except Exception:
+            continue
+    return None
+
 def extract_title(html):
+    # Try JSON-LD first
+    data = extract_metadata_from_jsonld(html)
+    if data:
+        if data.get('@type') == 'Episode':
+            series = data.get('partOfSeries')
+            if series and series.get('name'):
+                return clean_filename(series['name'])
+        elif data.get('@type') == 'Movie':
+            name = data.get('name')
+            if isinstance(name, list) and len(name) > 0:
+                first = name[0]
+                if isinstance(first, dict):
+                    return clean_filename(first.get('@value', 'Unknown'))
+                elif isinstance(first, str):
+                    return clean_filename(first)
+            elif isinstance(name, str):
+                return clean_filename(name)
+
     # Try og:title, then <title>, else None
     m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
     if m:
@@ -85,6 +123,16 @@ def gather_episode_links_from_html(html):
     for m in re.findall(r'(/detail/(?:episode|movie)/[a-zA-Z0-9\-\?_=&]+)', html):
         url = urljoin("https://www.mxplayer.in", m.split('"')[0])
         found.add(url.split("?")[0])  # normalize strip query
+
+    # Support new URL format: /show/watch-...
+    for m in re.findall(r'(/show/watch-[^"\'\s<>]+)', html):
+        url = urljoin("https://www.mxplayer.in", m)
+        # Filter out season pages if we only want episodes?
+        # Episode links usually contain 'online-<id>'. Season links usually contain 'season-<id>'.
+        # But regex catches both.
+        # We can keep both, fetch() loop handles them.
+        found.add(url.split("?")[0])
+
     # Also search for JSON blocks with "episodeId" or "detailUrl"
     for m in re.findall(r'https://www\.mxplayer\.in/detail/(?:episode|movie)/[a-zA-Z0-9\-\?=&]+', html):
         found.add(m.split("?")[0])
@@ -161,6 +209,30 @@ def parse_attr_list(s):
         out[k] = v
     return out
 
+def filter_master_playlist(m3u8_text):
+    """
+    Deduplicates AUDIO media lines by LANGUAGE/NAME.
+    Keeps only the first occurrence.
+    """
+    lines = m3u8_text.splitlines()
+    seen_audios = set()
+    out_lines = []
+
+    for line in lines:
+        if line.strip().startswith("#EXT-X-MEDIA") and "TYPE=AUDIO" in line:
+            attrs = parse_attr_list(line[len("#EXT-X-MEDIA:"):])
+            lang = attrs.get("LANGUAGE") or attrs.get("LANG")
+            name = attrs.get("NAME")
+            key = (lang, name)
+
+            if key not in seen_audios:
+                seen_audios.add(key)
+                out_lines.append(line)
+        else:
+            out_lines.append(line)
+
+    return "\n".join(out_lines)
+
 def choose_best_variant(variants):
     # prefer highest resolution height, fallback to bandwidth
     if not variants:
@@ -236,20 +308,29 @@ def build_output_name(title, season, episode, audio_label, quality_label, is_mov
         mid = f".{s}{e}" if s or e else ""
         return f"{title}{mid}.[{audio_label}].[{quality_label}].mp4"
 
-def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
+def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header, video_filter="best", audio_filter="best", base_url=None):
     # Build the command
+    save_dir = os.path.dirname(out_path)
+    save_name = os.path.splitext(os.path.basename(out_path))[0]
+
     cmd = [
         NM3U8DL_BIN,
         m3u8_url,
+        "--save-dir", save_dir,
+        "--save-name", save_name,
         "--header", f"User-Agent: {USER_AGENT}",
         "--header", f"Referer: {referer}",
         "--header", f"Origin: {ORIGIN}",
         "--header", f"Cookie: {cookies_header}",
-        "--select-video", "best",
-        "--select-audio", "best",
-        "-M", "format=" + out_path
+        "--select-video", video_filter,
+        "--select-audio", audio_filter,
+        "--thread-count", "16",
+        "--concurrent-download",
+        "-M", "format=mp4"
     ]
-    print("[*] Running:", " ".join(cmd[:6]), "...")  # don't print full cookie in logs
+    if base_url:
+        cmd.extend(["--base-url", base_url])
+    print("[*] Running:", " ".join(cmd[:8]), "...")  # don't print full cookie in logs
     try:
         p = subprocess.run(cmd, check=True)
         return p.returncode == 0
@@ -260,7 +341,148 @@ def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
         print(f"[!] {NM3U8DL_BIN} not found. Put it in PATH or edit NM3U8DL_BIN in script.")
         return False
 
+def ask_selection(variants, audio_tracks, auto_answers=None):
+    sorted_variants = sorted(variants, key=lambda v: (v['resolution'][1] if v.get('resolution') else 0, v.get('bandwidth',0)), reverse=True)
+
+    if auto_answers:
+        v_input = auto_answers.get('video', '1')
+    else:
+        # Print Video Options
+        print("\n[Video Options]")
+        for idx, v in enumerate(sorted_variants):
+            res = f"{v['resolution'][0]}x{v['resolution'][1]}" if v.get('resolution') else "Unknown"
+            bw = f"{int(v.get('bandwidth',0))/1000} kbps"
+            print(f"{idx+1}: {res} ({bw})")
+        v_input = input("Select Video [1]: ") or "1"
+
+    try:
+        v_idx = int(v_input) - 1
+        if 0 <= v_idx < len(sorted_variants):
+            selected_v = sorted_variants[v_idx]
+            video_filter = f"bw={selected_v['bandwidth']}"
+            q_label = get_quality_label(selected_v)
+        else:
+            if not auto_answers: print("Invalid index, using best.")
+            video_filter = "best"
+            q_label = "best"
+    except:
+        if not auto_answers: print("Invalid input, using best.")
+        video_filter = "best"
+        q_label = "best"
+
+    # Audio Options
+    if not audio_tracks:
+        if not auto_answers: print("\n[Audio Options]\nNo separate audio tracks found.")
+        audio_filter = "best"
+        a_label = "Unknown"
+        a_input = "1"
+    else:
+        if auto_answers:
+            a_input = auto_answers.get('audio', '1')
+        else:
+            print("\n[Audio Options]")
+            for idx, a in enumerate(audio_tracks):
+                lang = a.get('language') or 'Unknown'
+                name = a.get('name') or ''
+                print(f"{idx+1}: {lang} - {name}")
+            print("A: All Audio")
+            a_input = input("Select Audio (comma separated, e.g. 1,2) [1]: ") or "1"
+
+        selected_audios = []
+        if a_input.lower() == 'a':
+            audio_filter = "all"
+            a_label = "Multi"
+        else:
+            try:
+                idxs = [int(x.strip()) for x in a_input.split(',')]
+                valid_idxs = [i-1 for i in idxs if 0 <= i-1 < len(audio_tracks)]
+                if not valid_idxs:
+                     if not auto_answers: print("No valid audio selected, using best.")
+                     audio_filter = "best"
+                     a_label = "Unknown"
+                     selected_audios = []
+                else:
+                    selected_audios = [audio_tracks[i] for i in valid_idxs]
+                    if len(selected_audios) > 1:
+                        a_label = "Multi"
+                    else:
+                        a_label = selected_audios[0].get('language') or selected_audios[0].get('name') or "Unknown"
+
+            except Exception as e:
+                 if not auto_answers: print(f"Selection error ({e}), using best.")
+                 audio_filter = "best"
+                 a_label = "Unknown"
+                 selected_audios = []
+
+        if selected_audios:
+            regex_parts = []
+            for a in selected_audios:
+                gid = a.get('group_id')
+                l = a.get('language')
+                n = a.get('name')
+
+                # Prioritize Language then Name then GroupId
+                if l:
+                    regex_parts.append(re.escape(l))
+                elif n:
+                    regex_parts.append(re.escape(n))
+                elif gid:
+                    regex_parts.append(re.escape(gid))
+
+            if regex_parts:
+                audio_filter = f"({'|'.join(regex_parts)})"
+            else:
+                audio_filter = "best"
+
+    return video_filter, audio_filter, q_label, a_label, {'video': v_input, 'audio': a_input}
+
+def extract_path_context(html):
+    """
+    Extracts a path prefix or slug to filter valid episode links.
+    e.g. if firstVideo is /show/watch-jamnapaar/..., we expect other episodes to share /show/watch-jamnapaar/
+    """
+    # Try firstVideo webUrl
+    m = re.search(r'"firstVideo".+?"webUrl"\s*:\s*"([^"]+)"', html)
+    if m:
+        url = m.group(1)
+        # url might be /show/watch-jamnapaar/season-1/...
+        # extract /show/watch-jamnapaar/
+        match = re.match(r'(/show/watch-[^/]+/)', url)
+        if match:
+            return match.group(1)
+
+    # Try partOfSeries name
+    data = extract_metadata_from_jsonld(html)
+    if data:
+        series = data.get('partOfSeries')
+        if series and series.get('name'):
+            # Simple slugify: lowercase, remove special chars?
+            # This is a fallback and might be loose.
+            slug = series['name'].lower().replace(' ', '-')
+            return slug
+    return None
+
+def filter_episode_links(links, context):
+    if not context:
+        return links
+
+    filtered = []
+    for link in links:
+        # Check if link contains context (slug or prefix)
+        if context in link:
+            filtered.append(link)
+    return sorted(list(set(filtered)))
+
 def extract_season_episode_from_html(html):
+    # Try JSON-LD first
+    data = extract_metadata_from_jsonld(html)
+    if data and data.get('@type') == 'Episode':
+        s_info = data.get('partOfSeason')
+        s = s_info.get('seasonNumber') if s_info else None
+        e = data.get('episodeNumber')
+        if s is not None and e is not None:
+            return int(s), int(e)
+
     # Try to extract season/episode numeric info from metadata JSON
     # Look for "season":1,"episode":2 or similar
     m = re.search(r'"season"\s*:\s*(\d+)', html)
@@ -275,12 +497,20 @@ def extract_season_episode_from_html(html):
     return s, e
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python mx_auto_downloader.py cookies.txt <mx_url1> [<mx_url2> ...]")
-        print("       or: python mx_auto_downloader.py cookies.txt --urls-file urls.txt")
+    parser = argparse.ArgumentParser(description="MX Player Auto Downloader")
+    parser.add_argument("cookies_file", help="Path to Netscape cookies.txt")
+    parser.add_argument("urls", nargs="*", help="MX Player URLs")
+    parser.add_argument("--urls-file", help="File containing URLs (one per line)")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Enable interactive selection of quality/audio")
+    parser.add_argument("--save-links", help="Save extracted episode URLs to file")
+
+    args = parser.parse_args()
+
+    if not args.urls and not args.urls_file:
+        parser.print_help()
         sys.exit(1)
 
-    cookies_file = sys.argv[1]
+    cookies_file = args.cookies_file
     if not os.path.exists(cookies_file):
         print("cookies.txt not found:", cookies_file); sys.exit(1)
 
@@ -290,21 +520,31 @@ def main():
         print("[!] Warning: cookie header empty. Login-protected content may fail.")
 
     # gather URLs
-    urls = []
-    if sys.argv[2] == "--urls-file" and len(sys.argv) >= 4:
-        filep = sys.argv[3]
-        with open(filep, "r", encoding="utf-8") as f:
-            for line in f:
-                u=line.strip()
-                if u: urls.append(u)
-    else:
-        urls = sys.argv[2:]
+    urls = args.urls
+    if args.urls_file:
+        if os.path.exists(args.urls_file):
+            with open(args.urls_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    u=line.strip()
+                    if u: urls.append(u)
+        else:
+             print(f"[!] URLs file not found: {args.urls_file}")
 
     OUTDIR = f"mx_downloads_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(OUTDIR, exist_ok=True)
     print("[*] Output dir:", OUTDIR)
 
+    session_answers = None
+
     for url in urls:
+        # Basic validation
+        parsed = urlparse(url)
+        if not parsed.scheme.startswith("http"):
+            print(f"[!] Invalid URL scheme: {url}")
+            continue
+        if "mxplayer.in" not in parsed.netloc:
+            print(f"[!] Warning: Host '{parsed.netloc}' does not appear to be mxplayer.in. Check for typos.")
+
         print("\n" + "="*60)
         print("[*] Processing root URL:", url)
         page_html = fetch(url, cookie_header, referer=url)
@@ -318,6 +558,13 @@ def main():
             episode_pages = [url.split("?")[0]]
         else:
             eps = gather_episode_links_from_html(page_html)
+
+            # Filter links to avoid related shows
+            context = extract_path_context(page_html)
+            if context:
+                print(f"[*] Filtering links using context: {context}")
+                eps = filter_episode_links(eps, context)
+
             if eps:
                 episode_pages = eps
             else:
@@ -325,6 +572,15 @@ def main():
                 episode_pages = [url.split("?")[0]]
 
         print(f"[*] Found {len(episode_pages)} episode/movie pages to try.")
+
+        if args.save_links:
+            try:
+                with open(args.save_links, "a", encoding="utf-8") as f:
+                    for ep in episode_pages:
+                        f.write(ep + "\n")
+                print(f"[*] Appended links to {args.save_links}")
+            except Exception as e:
+                print(f"[!] Failed to save links: {e}")
 
         for ep_url in episode_pages:
             print("\n[>] Episode page:", ep_url)
@@ -371,17 +627,45 @@ def main():
                 print(f"[!] Failed to fetch m3u8 playlist: {e}")
                 continue
 
+            # Filter duplicates from master playlist to avoid download conflicts
+            m3u8_text = filter_master_playlist(m3u8_text)
+
+            # Save to temp file
+            temp_m3u8 = os.path.join(OUTDIR, "master.m3u8")
+            with open(temp_m3u8, "w", encoding="utf-8") as f:
+                f.write(m3u8_text)
+
+            # Base URL for relative paths
+            base_url = m3u8.rsplit('/', 1)[0] + '/'
+
             variants, audio_tracks = parse_master_playlist(m3u8_text)
-            chosen_variant = choose_best_variant(variants) or {"uri": m3u8}
-            quality_label = get_quality_label(chosen_variant)
-            audio_label = detect_audio_type(variants, audio_tracks, m3u8, cookie_header)
+
+            if args.interactive:
+                if session_answers:
+                    v_filter, a_filter, quality_label, audio_label, _ = ask_selection(variants, audio_tracks, auto_answers=session_answers)
+                else:
+                    v_filter, a_filter, quality_label, audio_label, user_inputs = ask_selection(variants, audio_tracks)
+                    # Ask to save selection if there are multiple episodes to process
+                    if len(episode_pages) > 1:
+                        save = input("\nApply this selection to all remaining episodes? [Y/n]: ") or "y"
+                        if save.lower() not in ['n', 'no']:
+                            session_answers = user_inputs
+            else:
+                chosen_variant = choose_best_variant(variants) or {"uri": m3u8}
+                quality_label = get_quality_label(chosen_variant)
+                audio_label = detect_audio_type(variants, audio_tracks, m3u8, cookie_header)
+                v_filter = "best"
+                a_filter = "best"
 
             is_movie = "/movie/" in ep_url
             outname = build_output_name(title, season_num, episode_num, audio_label, quality_label, is_movie=is_movie)
             outpath = os.path.join(OUTDIR, outname)
             print(f"[*] Download target: {outpath}")
 
-            success = run_n_m3u8dl(m3u8, outpath, referer=ep_url, cookies_header=cookie_header)
+            success = run_n_m3u8dl(temp_m3u8, outpath, referer=ep_url, cookies_header=cookie_header, video_filter=v_filter, audio_filter=a_filter, base_url=base_url)
+
+            if os.path.exists(temp_m3u8):
+                os.remove(temp_m3u8)
             if success:
                 print("[+] Finished:", outpath)
             else:

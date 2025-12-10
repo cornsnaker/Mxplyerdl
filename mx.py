@@ -238,18 +238,23 @@ def build_output_name(title, season, episode, audio_label, quality_label, is_mov
 
 def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
     # Build the command
+    save_dir = os.path.dirname(out_path)
+    save_name = os.path.splitext(os.path.basename(out_path))[0]
+
     cmd = [
         NM3U8DL_BIN,
         m3u8_url,
+        "--save-dir", save_dir,
+        "--save-name", save_name,
         "--header", f"User-Agent: {USER_AGENT}",
         "--header", f"Referer: {referer}",
         "--header", f"Origin: {ORIGIN}",
         "--header", f"Cookie: {cookies_header}",
         "--select-video", "best",
         "--select-audio", "best",
-        "-M", "format=" + out_path
+        "-M", "format=mp4"
     ]
-    print("[*] Running:", " ".join(cmd[:6]), "...")  # don't print full cookie in logs
+    print("[*] Running:", " ".join(cmd[:8]), "...")  # don't print full cookie in logs
     try:
         p = subprocess.run(cmd, check=True)
         return p.returncode == 0

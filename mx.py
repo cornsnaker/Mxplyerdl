@@ -333,47 +333,49 @@ def ask_selection(variants, audio_tracks):
 
     # Print Audio Options
     print("\n[Audio Options]")
-
-    unique_audios = []
-    seen_langs = set()
-    for a in audio_tracks:
-        label = a.get('language') or a.get('name') or 'Unknown'
-        if label not in seen_langs:
-            unique_audios.append(a)
-            seen_langs.add(label)
-
-    if not unique_audios:
+    if not audio_tracks:
         print("No separate audio tracks found.")
         audio_filter = "best"
         a_label = "Unknown"
     else:
-        for idx, a in enumerate(unique_audios):
+        for idx, a in enumerate(audio_tracks):
             lang = a.get('language') or 'Unknown'
             name = a.get('name') or ''
             print(f"{idx+1}: {lang} - {name}")
         print("A: All Audio")
+        print("U: Best of Each Language (Unique)")
 
         a_input = input("Select Audio (comma separated, e.g. 1,2) [1]: ") or "1"
 
         selected_audios = []
         if a_input.lower() == 'a':
-            selected_audios = unique_audios
+            audio_filter = "all"
             a_label = "Multi"
+        elif a_input.lower() == 'u':
+            # Deduplicate by language/name
+            unique_map = {}
+            for a in audio_tracks:
+                label = a.get('language') or a.get('name') or 'Unknown'
+                if label not in unique_map:
+                    unique_map[label] = a
+            selected_audios = list(unique_map.values())
+            a_label = "Multi-Unique"
         else:
             try:
                 idxs = [int(x.strip()) for x in a_input.split(',')]
-                valid_idxs = [i-1 for i in idxs if 0 < i <= len(unique_audios)]
+                valid_idxs = [i-1 for i in idxs if 0 < i <= len(audio_tracks)]
                 if not valid_idxs:
                      print("No valid audio selected, using best.")
                      audio_filter = "best"
                      a_label = "Unknown"
                      selected_audios = []
                 else:
-                    selected_audios = [unique_audios[i] for i in valid_idxs]
+                    selected_audios = [audio_tracks[i] for i in valid_idxs]
                     if len(selected_audios) > 1:
                         a_label = "Multi"
                     else:
                         a_label = selected_audios[0].get('language') or selected_audios[0].get('name') or "Unknown"
+
             except Exception as e:
                  print(f"Selection error ({e}), using best.")
                  audio_filter = "best"

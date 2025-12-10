@@ -61,7 +61,44 @@ def fetch(url, cookies_header, referer=None):
         print(f"[!] HTTP error fetching {url}: {e}")
         return ""
 
+def extract_metadata_from_jsonld(html):
+    """Parses application/ld+json block to extract series/movie info."""
+    pattern = r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>'
+    # Use finditer to check all blocks
+    for m in re.finditer(pattern, html, re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+            # Normalize to list
+            if isinstance(data, dict):
+                data = [data]
+
+            if isinstance(data, list):
+                for item in data:
+                    if item.get('@type') in ['Episode', 'Movie']:
+                        return item
+        except Exception:
+            continue
+    return None
+
 def extract_title(html):
+    # Try JSON-LD first
+    data = extract_metadata_from_jsonld(html)
+    if data:
+        if data.get('@type') == 'Episode':
+            series = data.get('partOfSeries')
+            if series and series.get('name'):
+                return clean_filename(series['name'])
+        elif data.get('@type') == 'Movie':
+            name = data.get('name')
+            if isinstance(name, list) and len(name) > 0:
+                first = name[0]
+                if isinstance(first, dict):
+                    return clean_filename(first.get('@value', 'Unknown'))
+                elif isinstance(first, str):
+                    return clean_filename(first)
+            elif isinstance(name, str):
+                return clean_filename(name)
+
     # Try og:title, then <title>, else None
     m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
     if m:
@@ -252,6 +289,8 @@ def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
         "--header", f"Cookie: {cookies_header}",
         "--select-video", "best",
         "--select-audio", "best",
+        "--thread-count", "16",
+        "--concurrent-download",
         "-M", "format=mp4"
     ]
     print("[*] Running:", " ".join(cmd[:8]), "...")  # don't print full cookie in logs
@@ -266,6 +305,15 @@ def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
         return False
 
 def extract_season_episode_from_html(html):
+    # Try JSON-LD first
+    data = extract_metadata_from_jsonld(html)
+    if data and data.get('@type') == 'Episode':
+        s_info = data.get('partOfSeason')
+        s = s_info.get('seasonNumber') if s_info else None
+        e = data.get('episodeNumber')
+        if s is not None and e is not None:
+            return int(s), int(e)
+
     # Try to extract season/episode numeric info from metadata JSON
     # Look for "season":1,"episode":2 or similar
     m = re.search(r'"season"\s*:\s*(\d+)', html)

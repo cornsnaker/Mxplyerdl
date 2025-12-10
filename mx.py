@@ -436,6 +436,43 @@ def ask_selection(variants, audio_tracks, auto_answers=None):
 
     return video_filter, audio_filter, q_label, a_label, {'video': v_input, 'audio': a_input}
 
+def extract_path_context(html):
+    """
+    Extracts a path prefix or slug to filter valid episode links.
+    e.g. if firstVideo is /show/watch-jamnapaar/..., we expect other episodes to share /show/watch-jamnapaar/
+    """
+    # Try firstVideo webUrl
+    m = re.search(r'"firstVideo".+?"webUrl"\s*:\s*"([^"]+)"', html)
+    if m:
+        url = m.group(1)
+        # url might be /show/watch-jamnapaar/season-1/...
+        # extract /show/watch-jamnapaar/
+        match = re.match(r'(/show/watch-[^/]+/)', url)
+        if match:
+            return match.group(1)
+
+    # Try partOfSeries name
+    data = extract_metadata_from_jsonld(html)
+    if data:
+        series = data.get('partOfSeries')
+        if series and series.get('name'):
+            # Simple slugify: lowercase, remove special chars?
+            # This is a fallback and might be loose.
+            slug = series['name'].lower().replace(' ', '-')
+            return slug
+    return None
+
+def filter_episode_links(links, context):
+    if not context:
+        return links
+
+    filtered = []
+    for link in links:
+        # Check if link contains context (slug or prefix)
+        if context in link:
+            filtered.append(link)
+    return sorted(list(set(filtered)))
+
 def extract_season_episode_from_html(html):
     # Try JSON-LD first
     data = extract_metadata_from_jsonld(html)
@@ -521,6 +558,13 @@ def main():
             episode_pages = [url.split("?")[0]]
         else:
             eps = gather_episode_links_from_html(page_html)
+
+            # Filter links to avoid related shows
+            context = extract_path_context(page_html)
+            if context:
+                print(f"[*] Filtering links using context: {context}")
+                eps = filter_episode_links(eps, context)
+
             if eps:
                 episode_pages = eps
             else:

@@ -369,7 +369,6 @@ def ask_selection(variants, audio_tracks):
             name = a.get('name') or ''
             print(f"{idx+1}: {lang} - {name}")
         print("A: All Audio")
-        print("U: Best of Each Language (Unique)")
 
         a_input = input("Select Audio (comma separated, e.g. 1,2) [1]: ") or "1"
 
@@ -377,15 +376,6 @@ def ask_selection(variants, audio_tracks):
         if a_input.lower() == 'a':
             audio_filter = "all"
             a_label = "Multi"
-        elif a_input.lower() == 'u':
-            # Deduplicate by language/name
-            unique_map = {}
-            for a in audio_tracks:
-                label = a.get('language') or a.get('name') or 'Unknown'
-                if label not in unique_map:
-                    unique_map[label] = a
-            selected_audios = list(unique_map.values())
-            a_label = "Multi-Unique"
         else:
             try:
                 idxs = [int(x.strip()) for x in a_input.split(',')]
@@ -415,12 +405,13 @@ def ask_selection(variants, audio_tracks):
                 l = a.get('language')
                 n = a.get('name')
 
-                if gid:
-                    regex_parts.append(re.escape(gid))
-                elif l:
+                # Prioritize Language then Name then GroupId
+                if l:
                     regex_parts.append(re.escape(l))
                 elif n:
                     regex_parts.append(re.escape(n))
+                elif gid:
+                    regex_parts.append(re.escape(gid))
 
             if regex_parts:
                 audio_filter = f"({'|'.join(regex_parts)})"

@@ -123,6 +123,16 @@ def gather_episode_links_from_html(html):
     for m in re.findall(r'(/detail/(?:episode|movie)/[a-zA-Z0-9\-\?_=&]+)', html):
         url = urljoin("https://www.mxplayer.in", m.split('"')[0])
         found.add(url.split("?")[0])  # normalize strip query
+
+    # Support new URL format: /show/watch-...
+    for m in re.findall(r'(/show/watch-[^"\'\s<>]+)', html):
+        url = urljoin("https://www.mxplayer.in", m)
+        # Filter out season pages if we only want episodes?
+        # Episode links usually contain 'online-<id>'. Season links usually contain 'season-<id>'.
+        # But regex catches both.
+        # We can keep both, fetch() loop handles them.
+        found.add(url.split("?")[0])
+
     # Also search for JSON blocks with "episodeId" or "detailUrl"
     for m in re.findall(r'https://www\.mxplayer\.in/detail/(?:episode|movie)/[a-zA-Z0-9\-\?=&]+', html):
         found.add(m.split("?")[0])

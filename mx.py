@@ -455,6 +455,7 @@ def main():
     parser.add_argument("urls", nargs="*", help="MX Player URLs")
     parser.add_argument("--urls-file", help="File containing URLs (one per line)")
     parser.add_argument("-i", "--interactive", action="store_true", help="Enable interactive selection of quality/audio")
+    parser.add_argument("--save-links", help="Save extracted episode URLs to file")
 
     args = parser.parse_args()
 
@@ -517,6 +518,15 @@ def main():
                 episode_pages = [url.split("?")[0]]
 
         print(f"[*] Found {len(episode_pages)} episode/movie pages to try.")
+
+        if args.save_links:
+            try:
+                with open(args.save_links, "a", encoding="utf-8") as f:
+                    for ep in episode_pages:
+                        f.write(ep + "\n")
+                print(f"[*] Appended links to {args.save_links}")
+            except Exception as e:
+                print(f"[!] Failed to save links: {e}")
 
         for ep_url in episode_pages:
             print("\n[>] Episode page:", ep_url)

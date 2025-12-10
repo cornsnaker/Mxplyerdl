@@ -333,12 +333,21 @@ def ask_selection(variants, audio_tracks):
 
     # Print Audio Options
     print("\n[Audio Options]")
-    if not audio_tracks:
+
+    unique_audios = []
+    seen_langs = set()
+    for a in audio_tracks:
+        label = a.get('language') or a.get('name') or 'Unknown'
+        if label not in seen_langs:
+            unique_audios.append(a)
+            seen_langs.add(label)
+
+    if not unique_audios:
         print("No separate audio tracks found.")
         audio_filter = "best"
         a_label = "Unknown"
     else:
-        for idx, a in enumerate(audio_tracks):
+        for idx, a in enumerate(unique_audios):
             lang = a.get('language') or 'Unknown'
             name = a.get('name') or ''
             print(f"{idx+1}: {lang} - {name}")
@@ -346,40 +355,49 @@ def ask_selection(variants, audio_tracks):
 
         a_input = input("Select Audio (comma separated, e.g. 1,2) [1]: ") or "1"
 
+        selected_audios = []
         if a_input.lower() == 'a':
-            audio_filter = "all"
+            selected_audios = unique_audios
             a_label = "Multi"
         else:
             try:
                 idxs = [int(x.strip()) for x in a_input.split(',')]
-                valid_idxs = [i-1 for i in idxs if 0 < i <= len(audio_tracks)]
+                valid_idxs = [i-1 for i in idxs if 0 < i <= len(unique_audios)]
                 if not valid_idxs:
                      print("No valid audio selected, using best.")
                      audio_filter = "best"
                      a_label = "Unknown"
+                     selected_audios = []
                 else:
-                    selected_audios = [audio_tracks[i] for i in valid_idxs]
-                    regex_parts = []
-                    for a in selected_audios:
-                        l = a.get('language')
-                        n = a.get('name')
-                        if l: regex_parts.append(re.escape(l))
-                        elif n: regex_parts.append(re.escape(n))
-
-                    if regex_parts:
-                        audio_filter = f"({'|'.join(regex_parts)})"
-                    else:
-                        audio_filter = "best"
-
+                    selected_audios = [unique_audios[i] for i in valid_idxs]
                     if len(selected_audios) > 1:
                         a_label = "Multi"
                     else:
-                         a_label = selected_audios[0].get('language') or selected_audios[0].get('name') or "Unknown"
-
+                        a_label = selected_audios[0].get('language') or selected_audios[0].get('name') or "Unknown"
             except Exception as e:
                  print(f"Selection error ({e}), using best.")
                  audio_filter = "best"
                  a_label = "Unknown"
+                 selected_audios = []
+
+        if selected_audios:
+            regex_parts = []
+            for a in selected_audios:
+                gid = a.get('group_id')
+                l = a.get('language')
+                n = a.get('name')
+
+                if gid:
+                    regex_parts.append(re.escape(gid))
+                elif l:
+                    regex_parts.append(re.escape(l))
+                elif n:
+                    regex_parts.append(re.escape(n))
+
+            if regex_parts:
+                audio_filter = f"({'|'.join(regex_parts)})"
+            else:
+                audio_filter = "best"
 
     return video_filter, audio_filter, q_label, a_label
 

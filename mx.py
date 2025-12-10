@@ -16,6 +16,7 @@ import sys
 import re
 import os
 import json
+import argparse
 import subprocess
 from urllib.parse import urljoin, urlparse
 from datetime import datetime
@@ -273,7 +274,7 @@ def build_output_name(title, season, episode, audio_label, quality_label, is_mov
         mid = f".{s}{e}" if s or e else ""
         return f"{title}{mid}.[{audio_label}].[{quality_label}].mp4"
 
-def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
+def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header, video_filter="best", audio_filter="best"):
     # Build the command
     save_dir = os.path.dirname(out_path)
     save_name = os.path.splitext(os.path.basename(out_path))[0]
@@ -287,8 +288,8 @@ def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
         "--header", f"Referer: {referer}",
         "--header", f"Origin: {ORIGIN}",
         "--header", f"Cookie: {cookies_header}",
-        "--select-video", "best",
-        "--select-audio", "best",
+        "--select-video", video_filter,
+        "--select-audio", audio_filter,
         "--thread-count", "16",
         "--concurrent-download",
         "-M", "format=mp4"
@@ -303,6 +304,84 @@ def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header):
     except FileNotFoundError:
         print(f"[!] {NM3U8DL_BIN} not found. Put it in PATH or edit NM3U8DL_BIN in script.")
         return False
+
+def ask_selection(variants, audio_tracks):
+    # Print Video Options
+    print("\n[Video Options]")
+    sorted_variants = sorted(variants, key=lambda v: (v['resolution'][1] if v.get('resolution') else 0, v.get('bandwidth',0)), reverse=True)
+
+    for idx, v in enumerate(sorted_variants):
+        res = f"{v['resolution'][0]}x{v['resolution'][1]}" if v.get('resolution') else "Unknown"
+        bw = f"{int(v.get('bandwidth',0))/1000} kbps"
+        print(f"{idx+1}: {res} ({bw})")
+
+    v_input = input("Select Video [1]: ") or "1"
+    try:
+        v_idx = int(v_input) - 1
+        if 0 <= v_idx < len(sorted_variants):
+            selected_v = sorted_variants[v_idx]
+            video_filter = f"bw={selected_v['bandwidth']}"
+            q_label = get_quality_label(selected_v)
+        else:
+            print("Invalid index, using best.")
+            video_filter = "best"
+            q_label = "best"
+    except:
+        print("Invalid input, using best.")
+        video_filter = "best"
+        q_label = "best"
+
+    # Print Audio Options
+    print("\n[Audio Options]")
+    if not audio_tracks:
+        print("No separate audio tracks found.")
+        audio_filter = "best"
+        a_label = "Unknown"
+    else:
+        for idx, a in enumerate(audio_tracks):
+            lang = a.get('language') or 'Unknown'
+            name = a.get('name') or ''
+            print(f"{idx+1}: {lang} - {name}")
+        print("A: All Audio")
+
+        a_input = input("Select Audio (comma separated, e.g. 1,2) [1]: ") or "1"
+
+        if a_input.lower() == 'a':
+            audio_filter = "all"
+            a_label = "Multi"
+        else:
+            try:
+                idxs = [int(x.strip()) for x in a_input.split(',')]
+                valid_idxs = [i-1 for i in idxs if 0 < i <= len(audio_tracks)]
+                if not valid_idxs:
+                     print("No valid audio selected, using best.")
+                     audio_filter = "best"
+                     a_label = "Unknown"
+                else:
+                    selected_audios = [audio_tracks[i] for i in valid_idxs]
+                    regex_parts = []
+                    for a in selected_audios:
+                        l = a.get('language')
+                        n = a.get('name')
+                        if l: regex_parts.append(re.escape(l))
+                        elif n: regex_parts.append(re.escape(n))
+
+                    if regex_parts:
+                        audio_filter = f"({'|'.join(regex_parts)})"
+                    else:
+                        audio_filter = "best"
+
+                    if len(selected_audios) > 1:
+                        a_label = "Multi"
+                    else:
+                         a_label = selected_audios[0].get('language') or selected_audios[0].get('name') or "Unknown"
+
+            except Exception as e:
+                 print(f"Selection error ({e}), using best.")
+                 audio_filter = "best"
+                 a_label = "Unknown"
+
+    return video_filter, audio_filter, q_label, a_label
 
 def extract_season_episode_from_html(html):
     # Try JSON-LD first
@@ -328,12 +407,19 @@ def extract_season_episode_from_html(html):
     return s, e
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python mx_auto_downloader.py cookies.txt <mx_url1> [<mx_url2> ...]")
-        print("       or: python mx_auto_downloader.py cookies.txt --urls-file urls.txt")
+    parser = argparse.ArgumentParser(description="MX Player Auto Downloader")
+    parser.add_argument("cookies_file", help="Path to Netscape cookies.txt")
+    parser.add_argument("urls", nargs="*", help="MX Player URLs")
+    parser.add_argument("--urls-file", help="File containing URLs (one per line)")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Enable interactive selection of quality/audio")
+
+    args = parser.parse_args()
+
+    if not args.urls and not args.urls_file:
+        parser.print_help()
         sys.exit(1)
 
-    cookies_file = sys.argv[1]
+    cookies_file = args.cookies_file
     if not os.path.exists(cookies_file):
         print("cookies.txt not found:", cookies_file); sys.exit(1)
 
@@ -343,15 +429,15 @@ def main():
         print("[!] Warning: cookie header empty. Login-protected content may fail.")
 
     # gather URLs
-    urls = []
-    if sys.argv[2] == "--urls-file" and len(sys.argv) >= 4:
-        filep = sys.argv[3]
-        with open(filep, "r", encoding="utf-8") as f:
-            for line in f:
-                u=line.strip()
-                if u: urls.append(u)
-    else:
-        urls = sys.argv[2:]
+    urls = args.urls
+    if args.urls_file:
+        if os.path.exists(args.urls_file):
+            with open(args.urls_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    u=line.strip()
+                    if u: urls.append(u)
+        else:
+             print(f"[!] URLs file not found: {args.urls_file}")
 
     OUTDIR = f"mx_downloads_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(OUTDIR, exist_ok=True)
@@ -425,16 +511,22 @@ def main():
                 continue
 
             variants, audio_tracks = parse_master_playlist(m3u8_text)
-            chosen_variant = choose_best_variant(variants) or {"uri": m3u8}
-            quality_label = get_quality_label(chosen_variant)
-            audio_label = detect_audio_type(variants, audio_tracks, m3u8, cookie_header)
+
+            if args.interactive:
+                v_filter, a_filter, quality_label, audio_label = ask_selection(variants, audio_tracks)
+            else:
+                chosen_variant = choose_best_variant(variants) or {"uri": m3u8}
+                quality_label = get_quality_label(chosen_variant)
+                audio_label = detect_audio_type(variants, audio_tracks, m3u8, cookie_header)
+                v_filter = "best"
+                a_filter = "best"
 
             is_movie = "/movie/" in ep_url
             outname = build_output_name(title, season_num, episode_num, audio_label, quality_label, is_movie=is_movie)
             outpath = os.path.join(OUTDIR, outname)
             print(f"[*] Download target: {outpath}")
 
-            success = run_n_m3u8dl(m3u8, outpath, referer=ep_url, cookies_header=cookie_header)
+            success = run_n_m3u8dl(m3u8, outpath, referer=ep_url, cookies_header=cookie_header, video_filter=v_filter, audio_filter=a_filter)
             if success:
                 print("[+] Finished:", outpath)
             else:

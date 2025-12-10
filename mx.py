@@ -199,6 +199,30 @@ def parse_attr_list(s):
         out[k] = v
     return out
 
+def filter_master_playlist(m3u8_text):
+    """
+    Deduplicates AUDIO media lines by LANGUAGE/NAME.
+    Keeps only the first occurrence.
+    """
+    lines = m3u8_text.splitlines()
+    seen_audios = set()
+    out_lines = []
+
+    for line in lines:
+        if line.strip().startswith("#EXT-X-MEDIA") and "TYPE=AUDIO" in line:
+            attrs = parse_attr_list(line[len("#EXT-X-MEDIA:"):])
+            lang = attrs.get("LANGUAGE") or attrs.get("LANG")
+            name = attrs.get("NAME")
+            key = (lang, name)
+
+            if key not in seen_audios:
+                seen_audios.add(key)
+                out_lines.append(line)
+        else:
+            out_lines.append(line)
+
+    return "\n".join(out_lines)
+
 def choose_best_variant(variants):
     # prefer highest resolution height, fallback to bandwidth
     if not variants:
@@ -274,7 +298,7 @@ def build_output_name(title, season, episode, audio_label, quality_label, is_mov
         mid = f".{s}{e}" if s or e else ""
         return f"{title}{mid}.[{audio_label}].[{quality_label}].mp4"
 
-def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header, video_filter="best", audio_filter="best"):
+def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header, video_filter="best", audio_filter="best", base_url=None):
     # Build the command
     save_dir = os.path.dirname(out_path)
     save_name = os.path.splitext(os.path.basename(out_path))[0]
@@ -294,6 +318,8 @@ def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header, video_filter="best
         "--concurrent-download",
         "-M", "format=mp4"
     ]
+    if base_url:
+        cmd.extend(["--base-url", base_url])
     print("[*] Running:", " ".join(cmd[:8]), "...")  # don't print full cookie in logs
     try:
         p = subprocess.run(cmd, check=True)
@@ -530,6 +556,17 @@ def main():
                 print(f"[!] Failed to fetch m3u8 playlist: {e}")
                 continue
 
+            # Filter duplicates from master playlist to avoid download conflicts
+            m3u8_text = filter_master_playlist(m3u8_text)
+
+            # Save to temp file
+            temp_m3u8 = os.path.join(OUTDIR, "master.m3u8")
+            with open(temp_m3u8, "w", encoding="utf-8") as f:
+                f.write(m3u8_text)
+
+            # Base URL for relative paths
+            base_url = m3u8.rsplit('/', 1)[0] + '/'
+
             variants, audio_tracks = parse_master_playlist(m3u8_text)
 
             if args.interactive:
@@ -546,7 +583,10 @@ def main():
             outpath = os.path.join(OUTDIR, outname)
             print(f"[*] Download target: {outpath}")
 
-            success = run_n_m3u8dl(m3u8, outpath, referer=ep_url, cookies_header=cookie_header, video_filter=v_filter, audio_filter=a_filter)
+            success = run_n_m3u8dl(temp_m3u8, outpath, referer=ep_url, cookies_header=cookie_header, video_filter=v_filter, audio_filter=a_filter, base_url=base_url)
+
+            if os.path.exists(temp_m3u8):
+                os.remove(temp_m3u8)
             if success:
                 print("[+] Finished:", outpath)
             else:

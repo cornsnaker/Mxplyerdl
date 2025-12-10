@@ -331,17 +331,20 @@ def run_n_m3u8dl(m3u8_url, out_path, referer, cookies_header, video_filter="best
         print(f"[!] {NM3U8DL_BIN} not found. Put it in PATH or edit NM3U8DL_BIN in script.")
         return False
 
-def ask_selection(variants, audio_tracks):
-    # Print Video Options
-    print("\n[Video Options]")
+def ask_selection(variants, audio_tracks, auto_answers=None):
     sorted_variants = sorted(variants, key=lambda v: (v['resolution'][1] if v.get('resolution') else 0, v.get('bandwidth',0)), reverse=True)
 
-    for idx, v in enumerate(sorted_variants):
-        res = f"{v['resolution'][0]}x{v['resolution'][1]}" if v.get('resolution') else "Unknown"
-        bw = f"{int(v.get('bandwidth',0))/1000} kbps"
-        print(f"{idx+1}: {res} ({bw})")
+    if auto_answers:
+        v_input = auto_answers.get('video', '1')
+    else:
+        # Print Video Options
+        print("\n[Video Options]")
+        for idx, v in enumerate(sorted_variants):
+            res = f"{v['resolution'][0]}x{v['resolution'][1]}" if v.get('resolution') else "Unknown"
+            bw = f"{int(v.get('bandwidth',0))/1000} kbps"
+            print(f"{idx+1}: {res} ({bw})")
+        v_input = input("Select Video [1]: ") or "1"
 
-    v_input = input("Select Video [1]: ") or "1"
     try:
         v_idx = int(v_input) - 1
         if 0 <= v_idx < len(sorted_variants):
@@ -349,28 +352,31 @@ def ask_selection(variants, audio_tracks):
             video_filter = f"bw={selected_v['bandwidth']}"
             q_label = get_quality_label(selected_v)
         else:
-            print("Invalid index, using best.")
+            if not auto_answers: print("Invalid index, using best.")
             video_filter = "best"
             q_label = "best"
     except:
-        print("Invalid input, using best.")
+        if not auto_answers: print("Invalid input, using best.")
         video_filter = "best"
         q_label = "best"
 
-    # Print Audio Options
-    print("\n[Audio Options]")
+    # Audio Options
     if not audio_tracks:
-        print("No separate audio tracks found.")
+        if not auto_answers: print("\n[Audio Options]\nNo separate audio tracks found.")
         audio_filter = "best"
         a_label = "Unknown"
+        a_input = "1"
     else:
-        for idx, a in enumerate(audio_tracks):
-            lang = a.get('language') or 'Unknown'
-            name = a.get('name') or ''
-            print(f"{idx+1}: {lang} - {name}")
-        print("A: All Audio")
-
-        a_input = input("Select Audio (comma separated, e.g. 1,2) [1]: ") or "1"
+        if auto_answers:
+            a_input = auto_answers.get('audio', '1')
+        else:
+            print("\n[Audio Options]")
+            for idx, a in enumerate(audio_tracks):
+                lang = a.get('language') or 'Unknown'
+                name = a.get('name') or ''
+                print(f"{idx+1}: {lang} - {name}")
+            print("A: All Audio")
+            a_input = input("Select Audio (comma separated, e.g. 1,2) [1]: ") or "1"
 
         selected_audios = []
         if a_input.lower() == 'a':
@@ -379,9 +385,9 @@ def ask_selection(variants, audio_tracks):
         else:
             try:
                 idxs = [int(x.strip()) for x in a_input.split(',')]
-                valid_idxs = [i-1 for i in idxs if 0 < i <= len(audio_tracks)]
+                valid_idxs = [i-1 for i in idxs if 0 <= i-1 < len(audio_tracks)]
                 if not valid_idxs:
-                     print("No valid audio selected, using best.")
+                     if not auto_answers: print("No valid audio selected, using best.")
                      audio_filter = "best"
                      a_label = "Unknown"
                      selected_audios = []
@@ -393,7 +399,7 @@ def ask_selection(variants, audio_tracks):
                         a_label = selected_audios[0].get('language') or selected_audios[0].get('name') or "Unknown"
 
             except Exception as e:
-                 print(f"Selection error ({e}), using best.")
+                 if not auto_answers: print(f"Selection error ({e}), using best.")
                  audio_filter = "best"
                  a_label = "Unknown"
                  selected_audios = []
@@ -418,7 +424,7 @@ def ask_selection(variants, audio_tracks):
             else:
                 audio_filter = "best"
 
-    return video_filter, audio_filter, q_label, a_label
+    return video_filter, audio_filter, q_label, a_label, {'video': v_input, 'audio': a_input}
 
 def extract_season_episode_from_html(html):
     # Try JSON-LD first
@@ -479,6 +485,8 @@ def main():
     OUTDIR = f"mx_downloads_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(OUTDIR, exist_ok=True)
     print("[*] Output dir:", OUTDIR)
+
+    session_answers = None
 
     for url in urls:
         print("\n" + "="*60)
@@ -561,7 +569,15 @@ def main():
             variants, audio_tracks = parse_master_playlist(m3u8_text)
 
             if args.interactive:
-                v_filter, a_filter, quality_label, audio_label = ask_selection(variants, audio_tracks)
+                if session_answers:
+                    v_filter, a_filter, quality_label, audio_label, _ = ask_selection(variants, audio_tracks, auto_answers=session_answers)
+                else:
+                    v_filter, a_filter, quality_label, audio_label, user_inputs = ask_selection(variants, audio_tracks)
+                    # Ask to save selection if there are multiple episodes to process
+                    if len(episode_pages) > 1:
+                        save = input("\nApply this selection to all remaining episodes? [Y/n]: ") or "y"
+                        if save.lower() not in ['n', 'no']:
+                            session_answers = user_inputs
             else:
                 chosen_variant = choose_best_variant(variants) or {"uri": m3u8}
                 quality_label = get_quality_label(chosen_variant)

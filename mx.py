@@ -489,6 +489,14 @@ def main():
     session_answers = None
 
     for url in urls:
+        # Basic validation
+        parsed = urlparse(url)
+        if not parsed.scheme.startswith("http"):
+            print(f"[!] Invalid URL scheme: {url}")
+            continue
+        if "mxplayer.in" not in parsed.netloc:
+            print(f"[!] Warning: Host '{parsed.netloc}' does not appear to be mxplayer.in. Check for typos.")
+
         print("\n" + "="*60)
         print("[*] Processing root URL:", url)
         page_html = fetch(url, cookie_header, referer=url)

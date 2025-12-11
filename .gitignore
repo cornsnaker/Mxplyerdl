@@ -1,0 +1,6 @@
+bin/
+mx_downloads_*/
+__pycache__/
+*.db
+*.session
+mx_downloads*/
